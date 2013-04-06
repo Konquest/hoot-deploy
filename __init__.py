@@ -78,7 +78,7 @@ class Bootstrap(BaseTask):
 
     def run(self):
         super(Bootstrap, self).run()
-        #self.create_virtualenv()
+        self.create_virtualenv()
         self.clone_git_repo()
         self.create_folders()
         self.upload_config_files()
@@ -139,13 +139,15 @@ class BaseDeploy(BaseTask):
                 #with prefix('source %(virtual_env)/bin/activate' % env):
                 #run('source %(virtual_env)s/bin/activate' % env)
                 run('pip install -r requirements.txt')
-                run('django-admin.py migrate --all')
-                run('django-admin.py collectstatic --noinput')
+                #run('django-admin.py migrate --all')
+                #run('django-admin.py collectstatic --noinput')
+                run('python ./manage.py migrate --all')
+                run('python ./manage.py collectstatic --noinput')
 
     def remove_old_releases(self):
         with cd('%(release_path)s/releases' % env):
             # Tidy up (remove) old releases
-            while int(run('ls -1 | wc -l')) >  env.release_count:
+            while int(run('ls -1 | wc -l')) >  (env.release_count + 1):
                 run('rm -Rf $(ls . | sort -f | head -n 1)')
 
 
@@ -166,8 +168,8 @@ class Deploy(BaseDeploy):
                 run('git checkout %(branch)s' % env)
 
             # symlink project to current release
-            #run('rm -f current')
-            run('ln -f -s %(release_path)s/releases/%(now)s %(release_path)s/releases/current' % env)
+            run('rm -f current')
+            run('ln -s %(release_path)s/releases/%(now)s %(release_path)s/releases/current' % env)
 
         self.remove_old_releases()
         self.update_and_migrate()
@@ -192,7 +194,7 @@ class Rollback(BaseDeploy):
             previous_release = output.split()[-1]
 
             # Move previous release to current
-            run('ln -s ' + previous_release+ ' %(release_path)s/releases/current' % env)
+            run('ln -sf ' + previous_release + ' %(release_path)s/releases/current' % env)
 
         self.remove_old_releases()
         self.update_and_migrate()
