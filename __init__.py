@@ -8,26 +8,13 @@ from fabric.operations import get
 from fabric import tasks
 from fabric.utils import abort, puts
 
-from django.conf import settings
+from django.conf import settings as django_settings
 
-django.settings_module('settings.development')
-for attr in ['DOMAIN', 'USER', 'HOST', 'PASSWORD', 'REPO']:
-    if not hasattr(settings, 'FABRIC_%s' % attr):
-        abort('You must set FABRIC_%s in your settings file' % attr)
-
-env.domain = settings.FABRIC_DOMAIN
-env.user = settings.FABRIC_USER
-env.hosts = [settings.FABRIC_HOST]
-env.password = settings.FABRIC_PASSWORD
-env.repo = settings.FABRIC_REPO
+import settings
 
 env.path = local('pwd')
 # Allow fabric to restart apache2
 env.always_use_pty = False
-
-# Number of previous deploy releases to keep
-RELEASE_COUNT = getattr(settings, 'FABRIC_RELEASES', 5)
-
 
 class BaseTask(tasks.Task):
 
@@ -38,12 +25,29 @@ class BaseTask(tasks.Task):
 
     def get_local_settings(self):
         django.settings_module('settings.development')
-        return settings
+        return django_settings
 
     def select_env(self, name='staging'):
         env.name = name
-        env.virtual_env = '$WORKON_HOME/%(domain)s' % env
+
         django.settings_module('settings.%(name)s' % env)
+        for attr in ['DOMAIN', 'USER', 'HOST', 'PASSWORD', 'REPO', 'BRANCH']:
+            if not hasattr(django_settings, 'FABRIC_%s' % attr):
+                abort('You must set FABRIC_%s in your settings file' % attr)
+
+        env.domain = django_settings.FABRIC_DOMAIN
+        env.user = django_settings.FABRIC_USER
+        env.hosts = [django_settings.FABRIC_HOST]
+        env.password = django_settings.FABRIC_PASSWORD
+        env.repo = django_settings.FABRIC_REPO
+        env.branch = django_settings.FABRIC_BRANCH
+        
+        env.virtual_env = '$WORKON_HOME/%(domain)s' % env
+        env.release_path = '/data/web/%(domain)s' % env
+
+        # Number of previous deploy releases to keep
+        env.release_count = getattr(django_settings, 'FABRIC_RELEASES', 5)
+
 
 
 class Production(BaseTask):
@@ -53,8 +57,7 @@ class Production(BaseTask):
     name = 'production'
 
     def run(self):
-        env.repo = env.domain.replace('.', '_')
-        return self.select_env('production')
+        self.select_env('production')
 
 
 class Staging(BaseTask):
@@ -64,9 +67,7 @@ class Staging(BaseTask):
     name = 'staging'
 
     def run(self):
-        env.repo = env.domain.replace('.', '_')
-        env.domain = 'staging.%(domain)s' % env
-        return self.select_env('staging')
+        self.select_env('staging')
 
 
 class Bootstrap(BaseTask):
@@ -83,27 +84,29 @@ class Bootstrap(BaseTask):
         self.upload_config_files()
 
     def create_virtualenv(self):
-        sudo('chmod 777 $WORKON_HOME/hook.log')
+        #sudo('chmod 777 $WORKON_HOME/hook.log')
+        run('source .bashrc')
         run('mkvirtualenv %(domain)s' % env)
         # append env vars to virtualenv activate file
         append('%(virtual_env)s/bin/activate' % env, ['',
             'export DJANGO_SETTINGS_MODULE=settings.%(name)s' % env,
-            'export PYTHONPATH=$VIRTUAL_ENV/project',
+            'export PYTHONPATH=%(release_path)s/releases/current' % env,
             ''])
 
     def clone_git_repo(self):
         # Checkout git repo from cahoona VM-3
-        run('mkdir -p %(virtual_env)s/releases' % env)
-        with cd('%(virtual_env)s/releases' % env):
-            run('git clone %(repo)s current' % env)
+        run('mkdir -p %(release_path)s/releases' % env)
+        with cd('%(release_path)s/releases' % env):
+            env.now = datetime.now().strftime('%Y%m%d%H%M%S')
+            run('git clone %(repo)s %(now)s' % env)
+            with cd(env.now):
+                run('git checkout %(branch)s' % env)
+
         # symlink project to current release
-        run('ln -s %(virtual_env)s/releases/current %(virtual_env)s/project'\
-            % env)
+        run('ln -s %(release_path)s/releases/%(now)s %(release_path)s/releases/current' % env)
 
     def create_folders(self):
-        vhost = '/var/www/vhosts/%(domain)s/' % env
-        run('mkdir %s' % vhost)
-        with cd(vhost):
+        with cd(env.release_path):
             run('mkdir -p {media,static,apache,log}')
             run('chmod 777 {media,log}')
 
@@ -111,8 +114,9 @@ class Bootstrap(BaseTask):
         vhost_root = '/var/www/vhosts/%(domain)s' % env
         kwargs = dict(context=env, use_sudo=True, backup=False)
         # wsgi
-        upload_template('%(real_fabfile)s/conf/wsgi.conf' % env,\
-                        vhost_root + '/apache/%(name)s.wsgi' % env, **kwargs)
+        upload_template('%(real_fabfile)s/conf/wsgi.conf' % env,
+                        '%(release_path)s/apache/%(name)s.wsgi' % env,
+                        **kwargs)
         # apache
         upload_template('%(real_fabfile)s/conf/apache.conf' % env,\
                     '/etc/apache2/sites-available/%(domain)s' % env, **kwargs)
@@ -130,16 +134,20 @@ class Bootstrap(BaseTask):
 class BaseDeploy(BaseTask):
 
     def update_and_migrate(self):
-        with cd('%(virtual_env)s/project' % env):
+        with cd('%(release_path)s/releases/current' % env):
             with prefix('workon %(domain)s' % env):
-                run('pip install -r REQUIREMENTS')
-                run('django-admin.py migrate --all')
-                run('django-admin.py collectstatic --noinput')
+                #with prefix('source %(virtual_env)/bin/activate' % env):
+                #run('source %(virtual_env)s/bin/activate' % env)
+                run('pip install -r requirements.txt')
+                #run('django-admin.py migrate --all')
+                #run('django-admin.py collectstatic --noinput')
+                run('python ./manage.py migrate --all')
+                run('python ./manage.py collectstatic --noinput')
 
     def remove_old_releases(self):
-        with cd('%(virtual_env)s/releases' % env):
+        with cd('%(release_path)s/releases' % env):
             # Tidy up (remove) old releases
-            while int(run('ls -1 | wc -l')) >  RELEASE_COUNT:
+            while int(run('ls -1 | wc -l')) >  (env.release_count + 1):
                 run('rm -Rf $(ls . | sort -f | head -n 1)')
 
 
@@ -151,15 +159,17 @@ class Deploy(BaseDeploy):
 
     def run(self):
         super(Deploy, self).run()
-        sudo('chmod 777 $WORKON_HOME/hook.log')
+        #sudo('chmod 777 $WORKON_HOME/hook.log')
 
-        # Move current to old release
-        with cd('%(virtual_env)s/releases' % env):
-            now = datetime.now().strftime('%Y%m%d%H%M%S')
-            run('cp -R current %s' % now)
+        with cd('%(release_path)s/releases' % env):
+            env.now = datetime.now().strftime('%Y%m%d%H%M%S')
+            run('git clone %(repo)s %(now)s' % env)
+            with cd(env.now):
+                run('git checkout %(branch)s' % env)
 
-        with cd('%(virtual_env)s/project' % env):
-            run('git pull')
+            # symlink project to current release
+            run('rm -f current')
+            run('ln -s %(release_path)s/releases/%(now)s %(release_path)s/releases/current' % env)
 
         self.remove_old_releases()
         self.update_and_migrate()
@@ -184,8 +194,7 @@ class Rollback(BaseDeploy):
             previous_release = output.split()[-1]
 
             # Move previous release to current
-            run('rm -Rf current')
-            run('mv %s current' % previous_release)
+            run('ln -sf ' + previous_release + ' %(release_path)s/releases/current' % env)
 
         self.remove_old_releases()
         self.update_and_migrate()
