@@ -135,12 +135,12 @@ class BaseDeploy(BaseTask):
 
     def update_and_migrate(self):
         with cd('%(release_path)s/releases/current' % env):
+            # remove placeholders
+            run('find . -name placeholder -delete')
+
+            # migrate + collect static files
             with prefix('workon %(domain)s' % env):
-                #with prefix('source %(virtual_env)/bin/activate' % env):
-                #run('source %(virtual_env)s/bin/activate' % env)
                 run('pip install -r requirements.txt')
-                #run('django-admin.py migrate --all')
-                #run('django-admin.py collectstatic --noinput')
                 run('python ./manage.py migrate --all')
                 run('python ./manage.py collectstatic --noinput')
 
