@@ -184,7 +184,7 @@ class Rollback(BaseDeploy):
 
     def run(self, update_requirements=True, migrate=True, static=True):
         super(Rollback, self).run()
-        with cd('%(virtual_env)s/releases' % env):
+        with cd('%(release_path)s/releases' % env):
             # Only rollback if we have previous releases
             if int(run('ls -1 | wc -l')) < 2:
                 abort('There is no previous release to rollback to')
